@@ -70,15 +70,26 @@ function NewTabPageContent() {
     }
 
     // For saved tabs (string IDs), use default collision detection to allow reordering
-    return pointerWithin(args);
+    // But also include droppable containers for cross-group moves
+    const allCollisions = pointerWithin(args);
+    const droppableCollisions = rectIntersection({
+      ...args,
+      droppableContainers: args.droppableContainers.filter((container: any) =>
+        container.id.toString().startsWith('droppable-')
+      ),
+    });
+
+    // Combine both types of collisions, prioritizing saved tabs for precise positioning
+    return [...allCollisions, ...droppableCollisions];
   };
 
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
 
-    console.log('Drag ended:', { active: active.id, over: over?.id });
-    console.log('Active ID type:', typeof active.id);
-    console.log('Over element:', over);
+    console.log('=== DRAG END DEBUG ===');
+    console.log('Active ID:', active.id, 'Type:', typeof active.id);
+    console.log('Over ID:', over?.id, 'Type:', typeof over?.id);
+    console.log('Over element full:', over);
 
     // Reset drag state
     setActiveId(null);
@@ -90,183 +101,222 @@ function NewTabPageContent() {
       return;
     }
 
-    // Handle dropping on a group
-    if (over.id.toString().startsWith('droppable-')) {
-      const groupId = over.id.toString().replace('droppable-', '');
-      console.log('Dropping on group:', groupId);
+    const currentSpace = savedSpaces[activeSpace];
+    const currentProject = currentSpace?.projects[activeProject];
+    const currentCategory = currentProject?.categories[activeCategory];
 
-      // Check if we're dropping an opened tab (number ID)
-      if (typeof active.id === 'number') {
-        const tabId = active.id as number;
-        console.log('Tab ID being dragged:', tabId);
-
-        try {
-          const tab = await chrome.tabs.get(tabId);
-          console.log('Tab info:', tab);
-
-          const currentSpace = savedSpaces[activeSpace];
-          const currentProject = currentSpace?.projects[activeProject];
-          const currentCategory = currentProject?.categories[activeCategory];
-
-          if (currentSpace && currentProject && currentCategory) {
-            // Find the target group to get the next order index
-            const targetGroup = currentCategory.groups.find(g => g.id === groupId);
-            const nextOrder = targetGroup ? targetGroup.tabs.length : 0;
-
-            const savedTab: SavedTab = {
-              id: uuidv7(),
-              url: tab.url || '',
-              title: tab.title || 'Untitled',
-              favicon: tab.favIconUrl || '',
-              description: tab.url || '',
-              order: nextOrder
-            };
-
-            console.log('Created saved tab with order:', savedTab);
-
-            console.log('Adding tab to:', {
-              space: currentSpace.name,
-              project: currentProject.name,
-              category: currentCategory.name,
-              groupId
-            });
-
-            addSavedTab(currentSpace.id, currentProject.id, currentCategory.id, groupId, savedTab);
-            console.log('Tab successfully added to group!');
-          } else {
-            console.error('Could not find active space/project/category');
-          }
-        } catch (error) {
-          console.error('Error handling tab drop:', error);
-        }
-      }
-
-      // Check if we're dropping a saved tab on a different group
-      if (typeof active.id === 'string') {
-        const currentSpace = savedSpaces[activeSpace];
-        const currentProject = currentSpace?.projects[activeProject];
-        const currentCategory = currentProject?.categories[activeCategory];
-
-        if (currentCategory) {
-          // Find the source group and tab
-          let sourceGroup: SavedGroup | null = null;
-          let draggedTab: SavedTab | null = null;
-
-          for (const group of currentCategory.groups) {
-            const foundTab = group.tabs.find(tab => tab.id === active.id);
-            if (foundTab) {
-              sourceGroup = group;
-              draggedTab = foundTab;
-              break;
-            }
-          }
-
-          if (sourceGroup && draggedTab) {
-            const targetGroup = currentCategory.groups.find(g => g.id === groupId);
-
-            // Check if we're moving to a different group
-            if (targetGroup && sourceGroup.id !== targetGroup.id) {
-              console.log('Moving saved tab between groups:', {
-                from: sourceGroup.name,
-                to: targetGroup.name,
-                tab: draggedTab.title
-              });
-
-              // Determine insertion position
-              let insertPosition = targetGroup.tabs.length; // Default to end
-
-              // If dropping over another saved tab in target group, insert before it
-              if (typeof over.id === 'string' && over.id !== active.id) {
-                const overTabIndex = targetGroup.tabs.findIndex(tab => tab.id === over.id);
-                if (overTabIndex !== -1) {
-                  insertPosition = overTabIndex;
-                  console.log('Inserting at position:', insertPosition);
-                }
-              }
-
-              // Remove from source group and update order indices
-              const updatedSourceTabs = sourceGroup.tabs
-                .filter(tab => tab.id !== draggedTab.id)
-                .map((tab, index) => ({ ...tab, order: index }));
-
-              // Insert into target group at specific position
-              const targetTabs = [...targetGroup.tabs];
-              const tabToMove = { ...draggedTab, order: insertPosition };
-
-              // Insert at the specified position
-              targetTabs.splice(insertPosition, 0, tabToMove);
-
-              // Update order indices for all tabs in target group
-              const updatedTargetTabs = targetTabs.map((tab, index) => ({
-                ...tab,
-                order: index
-              }));
-
-              // Update both groups
-              const updatedSourceGroup = { ...sourceGroup, tabs: updatedSourceTabs };
-              const updatedTargetGroup = { ...targetGroup, tabs: updatedTargetTabs };
-
-              // Update the saved spaces with both group changes
-              setSavedSpaces(savedSpaces.map(s =>
-                s.id === currentSpace.id ? {
-                  ...s,
-                  projects: s.projects.map(p =>
-                    p.id === currentProject.id ? {
-                      ...p,
-                      categories: p.categories.map(c =>
-                        c.id === currentCategory.id ? {
-                          ...c,
-                          groups: c.groups.map(g => {
-                            if (g.id === sourceGroup.id) return updatedSourceGroup;
-                            if (g.id === targetGroup.id) return updatedTargetGroup;
-                            return g;
-                          })
-                        } : c
-                      )
-                    } : p
-                  )
-                } : s
-              ));
-
-              console.log('Tab successfully moved between groups at position:', insertPosition);
-              return; // Exit early since we handled the cross-group move
-            }
-          }
-        }
-      }
+    if (!currentCategory) {
+      console.error('Could not find active space/project/category');
+      return;
     }
 
-    // Handle sorting within the same group
-    if (typeof active.id === 'string' && typeof over.id === 'string') {
-      const currentSpace = savedSpaces[activeSpace];
-      const currentProject = currentSpace?.projects[activeProject];
-      const currentCategory = currentProject?.categories[activeCategory];
+    // Handle dropping opened tabs (from right panel)
+    if (typeof active.id === 'number' && over.id.toString().startsWith('droppable-')) {
+      const groupId = over.id.toString().replace('droppable-', '');
+      console.log('Dropping opened tab on group:', groupId);
 
-      if (currentCategory) {
-        // Find which group contains the active tab
+      try {
+        const tab = await chrome.tabs.get(active.id as number);
+        const targetGroup = currentCategory.groups.find(g => g.id === groupId);
+        const nextOrder = targetGroup ? targetGroup.tabs.length : 0;
+
+        const savedTab: SavedTab = {
+          id: uuidv7(),
+          url: tab.url || '',
+          title: tab.title || 'Untitled',
+          favicon: tab.favIconUrl || '',
+          description: tab.url || '',
+          order: nextOrder
+        };
+
+        addSavedTab(currentSpace.id, currentProject.id, currentCategory.id, groupId, savedTab);
+        console.log('Opened tab successfully added to group!');
+      } catch (error) {
+        console.error('Error handling opened tab drop:', error);
+      }
+      return;
+    }
+
+    // Handle saved tab operations
+    if (typeof active.id === 'string') {
+      // Find the source group and dragged tab
+      let sourceGroup: SavedGroup | null = null;
+      let draggedTab: SavedTab | null = null;
+
+      for (const group of currentCategory.groups) {
+        const foundTab = group.tabs.find(tab => tab.id === active.id);
+        if (foundTab) {
+          sourceGroup = group;
+          draggedTab = foundTab;
+          break;
+        }
+      }
+
+      if (!sourceGroup || !draggedTab) {
+        console.error('Could not find source group or dragged tab');
+        return;
+      }
+
+      console.log('Found dragged tab:', draggedTab.title, 'in group:', sourceGroup.name);
+
+      // Case 1: Dropping on another saved tab (reorder within same group or move between groups)
+      if (typeof over.id === 'string' && !over.id.toString().startsWith('droppable-')) {
+        console.log('Dropping over another saved tab:', over.id);
+
+        // Find which group contains the target tab
+        let targetGroup: SavedGroup | null = null;
+        let targetTab: SavedTab | null = null;
+
         for (const group of currentCategory.groups) {
-          const activeIndex = group.tabs.findIndex(tab => tab.id === active.id);
-          const overIndex = group.tabs.findIndex(tab => tab.id === over.id);
+          const foundTab = group.tabs.find(tab => tab.id === over.id);
+          if (foundTab) {
+            targetGroup = group;
+            targetTab = foundTab;
+            break;
+          }
+        }
+
+        if (!targetGroup || !targetTab) {
+          console.error('Could not find target group or tab');
+          return;
+        }
+
+        console.log('Target group:', targetGroup.name, 'Target tab:', targetTab.title);
+
+        // Same group reordering
+        if (sourceGroup.id === targetGroup.id) {
+          console.log('Reordering within same group');
+          const activeIndex = sourceGroup.tabs.findIndex(tab => tab.id === active.id);
+          const overIndex = sourceGroup.tabs.findIndex(tab => tab.id === over.id);
 
           if (activeIndex !== -1 && overIndex !== -1) {
-            console.log('Sorting tabs within group:', group.name);
-            const newTabs = arrayMove(group.tabs, activeIndex, overIndex);
-
-            // Update order field for all tabs after reordering
+            const newTabs = arrayMove(sourceGroup.tabs, activeIndex, overIndex);
             const tabsWithUpdatedOrder = newTabs.map((tab, index) => ({
               ...tab,
               order: index
             }));
 
-            const updatedGroup = { ...group, tabs: tabsWithUpdatedOrder };
-
+            const updatedGroup = { ...sourceGroup, tabs: tabsWithUpdatedOrder };
             updateSavedGroup(currentSpace.id, currentProject.id, currentCategory.id, updatedGroup);
-            console.log('Tabs reordered successfully with updated order indices!');
-            break;
+            console.log('Same group reordering completed');
           }
+        } else {
+          // Cross-group move
+          console.log('Moving between different groups');
+
+          // Sort target group tabs to get correct insertion position
+          const sortedTargetTabs = [...targetGroup.tabs].sort((a, b) => {
+            const orderA = a.order ?? 0;
+            const orderB = b.order ?? 0;
+            return orderA - orderB;
+          });
+
+          // Find insertion position (before the target tab)
+          const insertPosition = sortedTargetTabs.findIndex(tab => tab.id === over.id);
+          console.log('Insert position:', insertPosition);
+
+          // Remove from source group
+          const updatedSourceTabs = sourceGroup.tabs
+            .filter(tab => tab.id !== draggedTab.id)
+            .map((tab, index) => ({ ...tab, order: index }));
+
+          // Insert into target group at correct position
+          const tabToMove = { ...draggedTab };
+          sortedTargetTabs.splice(insertPosition, 0, tabToMove);
+
+          // Update order indices
+          const updatedTargetTabs = sortedTargetTabs.map((tab, index) => ({
+            ...tab,
+            order: index
+          }));
+
+          // Update both groups
+          const updatedSourceGroup = { ...sourceGroup, tabs: updatedSourceTabs };
+          const updatedTargetGroup = { ...targetGroup, tabs: updatedTargetTabs };
+
+          setSavedSpaces(savedSpaces.map(s =>
+            s.id === currentSpace.id ? {
+              ...s,
+              projects: s.projects.map(p =>
+                p.id === currentProject.id ? {
+                  ...p,
+                  categories: p.categories.map(c =>
+                    c.id === currentCategory.id ? {
+                      ...c,
+                      groups: c.groups.map(g => {
+                        if (g.id === sourceGroup.id) return updatedSourceGroup;
+                        if (g.id === targetGroup.id) return updatedTargetGroup;
+                        return g;
+                      })
+                    } : c
+                  )
+                } : p
+              )
+            } : s
+          ));
+
+          console.log('Cross-group move completed at position:', insertPosition);
+        }
+      }
+      // Case 2: Dropping on group area (droppable zone)
+      else if (over.id.toString().startsWith('droppable-')) {
+        const groupId = over.id.toString().replace('droppable-', '');
+        const targetGroup = currentCategory.groups.find(g => g.id === groupId);
+
+        if (!targetGroup) {
+          console.error('Could not find target group');
+          return;
+        }
+
+        console.log('Dropping on group area:', targetGroup.name);
+
+        // Only handle cross-group moves here (same group is handled above)
+        if (sourceGroup.id !== targetGroup.id) {
+          console.log('Moving to different group (append to end)');
+
+          // Remove from source group
+          const updatedSourceTabs = sourceGroup.tabs
+            .filter(tab => tab.id !== draggedTab.id)
+            .map((tab, index) => ({ ...tab, order: index }));
+
+          // Add to end of target group
+          const tabToMove = { ...draggedTab, order: targetGroup.tabs.length };
+          const updatedTargetTabs = [
+            ...targetGroup.tabs.map((tab, index) => ({ ...tab, order: tab.order ?? index })),
+            tabToMove
+          ];
+
+          // Update both groups
+          const updatedSourceGroup = { ...sourceGroup, tabs: updatedSourceTabs };
+          const updatedTargetGroup = { ...targetGroup, tabs: updatedTargetTabs };
+
+          setSavedSpaces(savedSpaces.map(s =>
+            s.id === currentSpace.id ? {
+              ...s,
+              projects: s.projects.map(p =>
+                p.id === currentProject.id ? {
+                  ...p,
+                  categories: p.categories.map(c =>
+                    c.id === currentCategory.id ? {
+                      ...c,
+                      groups: c.groups.map(g => {
+                        if (g.id === sourceGroup.id) return updatedSourceGroup;
+                        if (g.id === targetGroup.id) return updatedTargetGroup;
+                        return g;
+                      })
+                    } : c
+                  )
+                } : p
+              )
+            } : s
+          ));
+
+          console.log('Cross-group move to end completed');
         }
       }
     }
+
+    console.log('=== DRAG END COMPLETE ===');
   };
 
   return (
