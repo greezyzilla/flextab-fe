@@ -5,11 +5,11 @@ import { DndContext, type DragEndEvent, DragOverlay, type DragStartEvent, pointe
 import { arrayMove } from "@dnd-kit/sortable"
 import { useSavedSpaces } from "~src/context/SavedSpacesContext"
 import { v7 as uuidv7 } from "uuid"
-import type { SavedTab } from "~src/types"
+import type { SavedTab, SavedGroup } from "~src/types"
 import { useState } from "react"
 
 function NewTabPageContent() {
-  const { savedSpaces, activeSpace, activeProject, activeCategory, addSavedTab, updateSavedGroup } = useSavedSpaces();
+  const { savedSpaces, setSavedSpaces, activeSpace, activeProject, activeCategory, addSavedTab, updateSavedGroup } = useSavedSpaces();
   const [activeId, setActiveId] = useState<string | number | null>(null);
   const [draggedTab, setDraggedTab] = useState<chrome.tabs.Tab | null>(null);
   const [draggedSavedTab, setDraggedSavedTab] = useState<SavedTab | null>(null);
@@ -138,6 +138,100 @@ function NewTabPageContent() {
           }
         } catch (error) {
           console.error('Error handling tab drop:', error);
+        }
+      }
+
+      // Check if we're dropping a saved tab on a different group
+      if (typeof active.id === 'string') {
+        const currentSpace = savedSpaces[activeSpace];
+        const currentProject = currentSpace?.projects[activeProject];
+        const currentCategory = currentProject?.categories[activeCategory];
+
+        if (currentCategory) {
+          // Find the source group and tab
+          let sourceGroup: SavedGroup | null = null;
+          let draggedTab: SavedTab | null = null;
+
+          for (const group of currentCategory.groups) {
+            const foundTab = group.tabs.find(tab => tab.id === active.id);
+            if (foundTab) {
+              sourceGroup = group;
+              draggedTab = foundTab;
+              break;
+            }
+          }
+
+          if (sourceGroup && draggedTab) {
+            const targetGroup = currentCategory.groups.find(g => g.id === groupId);
+
+            // Check if we're moving to a different group
+            if (targetGroup && sourceGroup.id !== targetGroup.id) {
+              console.log('Moving saved tab between groups:', {
+                from: sourceGroup.name,
+                to: targetGroup.name,
+                tab: draggedTab.title
+              });
+
+              // Determine insertion position
+              let insertPosition = targetGroup.tabs.length; // Default to end
+
+              // If dropping over another saved tab in target group, insert before it
+              if (typeof over.id === 'string' && over.id !== active.id) {
+                const overTabIndex = targetGroup.tabs.findIndex(tab => tab.id === over.id);
+                if (overTabIndex !== -1) {
+                  insertPosition = overTabIndex;
+                  console.log('Inserting at position:', insertPosition);
+                }
+              }
+
+              // Remove from source group and update order indices
+              const updatedSourceTabs = sourceGroup.tabs
+                .filter(tab => tab.id !== draggedTab.id)
+                .map((tab, index) => ({ ...tab, order: index }));
+
+              // Insert into target group at specific position
+              const targetTabs = [...targetGroup.tabs];
+              const tabToMove = { ...draggedTab, order: insertPosition };
+
+              // Insert at the specified position
+              targetTabs.splice(insertPosition, 0, tabToMove);
+
+              // Update order indices for all tabs in target group
+              const updatedTargetTabs = targetTabs.map((tab, index) => ({
+                ...tab,
+                order: index
+              }));
+
+              // Update both groups
+              const updatedSourceGroup = { ...sourceGroup, tabs: updatedSourceTabs };
+              const updatedTargetGroup = { ...targetGroup, tabs: updatedTargetTabs };
+
+              // Update the saved spaces with both group changes
+              setSavedSpaces(savedSpaces.map(s =>
+                s.id === currentSpace.id ? {
+                  ...s,
+                  projects: s.projects.map(p =>
+                    p.id === currentProject.id ? {
+                      ...p,
+                      categories: p.categories.map(c =>
+                        c.id === currentCategory.id ? {
+                          ...c,
+                          groups: c.groups.map(g => {
+                            if (g.id === sourceGroup.id) return updatedSourceGroup;
+                            if (g.id === targetGroup.id) return updatedTargetGroup;
+                            return g;
+                          })
+                        } : c
+                      )
+                    } : p
+                  )
+                } : s
+              ));
+
+              console.log('Tab successfully moved between groups at position:', insertPosition);
+              return; // Exit early since we handled the cross-group move
+            }
+          }
         }
       }
     }
